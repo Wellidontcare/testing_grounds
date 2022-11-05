@@ -60,8 +60,9 @@ public:
   }
 
   Matrix2D(const Matrix2D &other)
-      : width_(other.width_), height_(other.height_), data_(other.data_) {
-    references_[data_]++;
+      : width_(other.width_), height_(other.height_),
+        data_(new decltype(other(0, 0))[other.width_ * other.height_]){
+    std::copy_n(other.data_, size(), data_);
   };
 
   Matrix2D(Matrix2D &&other)
@@ -74,6 +75,9 @@ public:
   }
 
   Matrix2D &operator=(const Matrix2D &other) {
+    if(this == &other){
+      return *this;
+    }
     width_ = other.width_;
     height_ = other.height_;
     if(data_ != other.data_ && references_[data_] == 1){
@@ -96,6 +100,8 @@ public:
     this->references_[data_]++;
     return *this;
   }
+
+  auto size() -> SizeType { return width_ * height_; }
 
   auto begin() {
     return this->data_;
@@ -166,6 +172,7 @@ public:
     return stream;
   }
 };
+
 template<std::integral SizeType, Arithmetic PixelType>
 std::unordered_map<void*, size_t> Matrix2D<SizeType, PixelType>::references_ = std::unordered_map<void*, size_t>{};
 
