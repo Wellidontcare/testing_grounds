@@ -1,15 +1,36 @@
-#include <initializer_list>
-#include <ios>
-#include <iterator>
-#include <iostream>
-#include <utility>
-#include <iomanip>
-#include <vector>
+#include <algorithm>
+#include <bits/chrono.h>
+#include <cassert>
+#include <chrono>
 #include <concepts>
+#include <execution>
+#include <functional>
+#include <initializer_list>
+#include <iomanip>
+#include <ios>
+#include <iostream>
+#include <iterator>
+#include <pstl/glue_execution_defs.h>
+#include <tuple>
 #include <type_traits>
 #include <unordered_map>
-#include <algorithm>
-#include <cassert>
+#include <utility>
+#include <vector>
+
+static auto allocations = 0;
+static auto allocations_total = 0;
+
+void* operator new(size_t bytes){
+  std::cout << "Allocating " << bytes << " bytes!\n";
+  allocations++;
+  allocations_total++;
+  return malloc(bytes);
+}
+
+void operator delete(void* mem) noexcept {
+  free(mem);
+  allocations--;
+}
 
 template <typename T>
 concept Arithmetic = std::is_arithmetic_v<T>;
@@ -34,10 +55,12 @@ concept HasRandomAccess = requires(T object) {
                           };
 
 template <typename T>
-concept Matrix2DLike = HasColumns<T> && HasRows<T> && HasRandomAccess<T>;
+concept Matrix2DLike = HasColumns<T> && HasRows<T> && HasRandomAccess<T> &&
+                       std::is_copy_assignable_v<T>;
+
+auto exec_policy = std::execution::par_unseq;
 
 template <std::integral SizeType, Arithmetic ValueType> class Matrix2D {
-  static std::unordered_map<void *, size_t> references_;
   SizeType width_;
   SizeType height_;
 
@@ -47,16 +70,14 @@ public:
   Matrix2D() : width_(0), height_(0), data_(nullptr){};
   Matrix2D(SizeType rows, SizeType cols, ValueType value)
       : width_(cols), height_(rows), data_(new ValueType[rows * cols]) {
-    references_[data_]++;
-    std::fill_n(data_, rows * cols, value);
+    std::fill_n(exec_policy, data_, rows * cols, value);
   }
 
   Matrix2D(SizeType rows, SizeType cols,
            std::initializer_list<ValueType> values)
       : width_(cols), height_(rows), data_(new ValueType[rows * cols]) {
     assert(values.size() == rows * cols && "Matrix size does not match data");
-    std::copy(std::begin(values), std::end(values), data_);
-    references_[data_]++;
+    std::copy(exec_policy, std::begin(values), std::end(values), data_);
   }
 
   Matrix2D(const Matrix2D &other)
@@ -69,35 +90,20 @@ public:
       : width_(std::move(other.width_)), height_(std::move(other.height_)),
         data_(std::move(other.data_)){};
   ~Matrix2D() {
-    if (references_[data_] == 1) {
-      references_.erase(data_);
-    }
+    delete[] data_;
   }
 
-  Matrix2D &operator=(const Matrix2D &other) {
+  friend void swap(Matrix2D& first, Matrix2D& second){
+    std::swap(first.width_, second.width_);
+    std::swap(first.height_, second.height_);
+    std::swap(first.data_, second.data_);
+  }
+
+  auto operator=(Matrix2D other) -> Matrix2D& {
     if(this == &other){
       return *this;
     }
-    width_ = other.width_;
-    height_ = other.height_;
-    if(data_ != other.data_ && references_[data_] == 1){
-      references_.erase(references_.find(data_));
-      delete[] data_;
-      data_ = other.data_;
-    }
-    references_[data_]++;
-    return *this;
-  }
-
-  Matrix2D& operator=(Matrix2D&& other){
-    this->width_ = std::move(other.width_);
-    this->height_ = std::move(other.height_);
-    if(data_ != other.data_ && references_[data_] == 1){
-      references_.erase(references_.find(data_));
-      delete[] data_;
-      this->data_ = std::move(other.data_);
-    }
-    this->references_[data_]++;
+    swap(*this, other);
     return *this;
   }
 
@@ -130,29 +136,63 @@ public:
     return data_[x + y * width_];
   }
 
-  auto operator*(const Matrix2D &other) -> Matrix2D {
+  auto dot(const Matrix2D &other) -> Matrix2D {
     assert(this->rows() == other.cols() && "Matrix sizes do not match");
     Matrix2D result(rows(), other.cols(), ValueType{});
-      for(SizeType col = 0; col < other.cols(); ++col){
-        for(SizeType row = 0; row < rows(); ++row){
-        for(SizeType k = 0; k < other.cols(); ++k){
-          result(row, col) += (*this)(row, k)*other(k, col);
+    for (SizeType col = 0; col < other.cols(); ++col) {
+      for (SizeType row = 0; row < rows(); ++row) {
+        for (SizeType k = 0; k < other.cols(); ++k) {
+          result(row, col) += (*this)(row, k) * other(k, col);
         }
       }
     }
     return result;
   }
 
-  auto operator+(const Matrix2D& other) -> Matrix2D {
+  auto operator+(const Matrix2D &other) -> Matrix2D {
     assert(this->rows() == other.rows() && this->cols() == other.cols() &&
            "Matrix size missmatch on addition (matrices must be equal size)");
-    Matrix2D result(rows(), cols(), 0);
-    for(SizeType y = 0; y < rows(); ++y){
-      for(SizeType x = 0; x < cols(); ++x){
-        result(x, y) = (*this)(x, y) + other(x, y);
-      }
-    }
+    return binary_op_copy(other, ::std::plus<ValueType>());
+  }
+
+  auto operator-(const Matrix2D &other) -> Matrix2D {
+    assert(this->rows() == other.rows() && this->cols() == other.cols() &&
+           "Matrix size missmatch on addition (matrices must be equal size)");
+    return binary_op_copy(other, ::std::minus<ValueType>());
+  }
+
+  auto operator*(const Matrix2D &other) -> Matrix2D {
+    assert(this->rows() == other.rows() && this->cols() == other.cols() &&
+           "Matrix size missmatch on addition (matrices must be equal size)");
+    return binary_op_copy(other, ::std::multiplies<ValueType>());
+  }
+
+  auto operator/(const Matrix2D &other) -> Matrix2D {
+    assert(this->rows() == other.rows() && this->cols() == other.cols() &&
+           "Matrix size missmatch on addition (matrices must be equal size)");
+    return binary_op_copy(other, ::std::divides<ValueType>());
+  }
+
+  auto operator-() -> Matrix2D {
+    Matrix2D result(rows(), cols(), ValueType{});
+    std::transform(exec_policy, std::begin(result), std::end(result), [](auto v){return -v;});
     return result;
+  }
+  
+  auto operator+=(const Matrix2D& other) -> Matrix2D& {
+      return binary_op_in_place(other, ::std::plus<ValueType>());
+  }
+  
+  auto operator-=(const Matrix2D& other) -> Matrix2D& {
+      return binary_op_in_place(other, ::std::minus<ValueType>());
+  }
+
+  auto operator*=(const Matrix2D &other) -> Matrix2D & {
+      return binary_op_in_place(other, ::std::multiplies<ValueType>());
+  }
+
+  auto operator/=(const Matrix2D &other) -> Matrix2D & {
+      return binary_op_in_place(other, ::std::divides<ValueType>());
   }
 
   friend std::ostream& operator<<(std::ostream& stream, const Matrix2D& mat){
@@ -171,10 +211,33 @@ public:
     stream << std::resetiosflags(std::ios::showbase);
     return stream;
   }
-};
 
-template<std::integral SizeType, Arithmetic PixelType>
-std::unordered_map<void*, size_t> Matrix2D<SizeType, PixelType>::references_ = std::unordered_map<void*, size_t>{};
+private:
+  auto binary_op_copy(const Matrix2D &other,
+                 std::function<ValueType(ValueType, ValueType)> op)
+      -> Matrix2D {
+    assert(this->rows() == other.rows() && this->cols() == other.cols() &&
+           "Matrix sizes do not match (binary operation requires matrices of "
+           "same size)");
+    Matrix2D result(rows(), cols(), ValueType{});
+    std::transform(exec_policy, std::begin(*this), std::end(*this),
+                   std::begin(other), std::begin(result),
+                   [=](auto a, auto b) { return op(a, b); });
+    return result;
+  }
+  
+  auto binary_op_in_place(const Matrix2D &other,
+                 std::function<ValueType(ValueType, ValueType)> op)
+      -> Matrix2D& {
+    assert(this->rows() == other.rows() && this->cols() == other.cols() &&
+           "Matrix sizes do not match (binary operation requires matrices of "
+           "same size)");
+    std::transform(exec_policy, std::begin(*this), std::end(*this),
+                   std::begin(other), std::begin(*this),
+                   [=](auto a, auto b) { return op(a, b); });
+    return *this;
+  }
+};
 
 template <Matrix2DLike Matrix>
 Matrix pad(const Matrix &mat,
@@ -191,8 +254,29 @@ Matrix pad(const Matrix &mat,
 }
 
 auto main() -> int {
-  Matrix2D mat2(3, 3, {1, 2, 3,
-                       4, 5, 6,
-                       7, 8, 9});
-  std::cout << pad(mat2, 1) + Matrix2D(5, 5, 1) << "\n";
+  {
+  auto start = std::chrono::high_resolution_clock::now();
+  int w, h;
+  std::cout << "W: ";
+  std::cin >> w;
+  std::cout << "H: ";
+  std::cin >> h;
+  float start_value;
+  std::cout << "Start Value: ";
+  std::cin >> start_value;
+  Matrix2D mat2(w, h, start_value);
+  Matrix2D res(w, h, decltype(start_value){});
+  for(int i = 0; i < 100; ++i){
+    res += mat2;
+  }
+  auto end = std::chrono::high_resolution_clock::now();
+  std::cout << "\n" << res << "\n";
+  std::cout << "Policy: " << typeid(exec_policy).name() << "Took: "
+            << std::chrono::duration_cast<std::chrono::milliseconds>(end -
+                                                                     start)
+                   .count()
+            << "ms\n";
+  }
+  std::cout << "Uncleaned: " << allocations << "\n";
+  std::cout << "Allocations: " << allocations_total << "\n";
 }
