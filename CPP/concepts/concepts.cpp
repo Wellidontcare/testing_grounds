@@ -267,7 +267,7 @@ auto main() -> int {
   Matrix2D mat2(w, h, start_value);
   Matrix2D res(w, h, decltype(start_value){});
   for(int i = 0; i < 100; ++i){
-    res += mat2;
+      res += mat2;
   }
   auto end = std::chrono::high_resolution_clock::now();
   std::cout << "\n" << res << "\n";
