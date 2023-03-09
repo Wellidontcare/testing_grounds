@@ -22,9 +22,16 @@ def find_fitting_rect(corners: NDArray):
 if __name__ == "__main__":
     w, h = 100, 100
     x, y = 10, 10
-    corners = np.array([[x , y], [x + w  + 10, y], [x + w, y + h + 100], [x, y + h]])
+    points = np.array([[815, 847], [2031, 878], [812, 1453], [2062, 1507]])
+    x = points[:, 0]
+    y = points[:, 1]
+
+    #corners = np.array([[x , y], [x + w  + 10, y], [x + w, y + h + 100], [x, y + h]])
+    corners = points
+
+    print(corners)
     corners_rect = find_fitting_rect(corners)
-    image = cv2.imread("./Pictures/profile.jpg", cv2.IMREAD_GRAYSCALE)
+    image = np.zeros((4000, 4000), dtype='uint8')
     image = cv2.fillPoly(image, corners.reshape(1, 4, 2), (255, 255, 255))
     image = cv2.rectangle(image, corners[0], corners[1], (255, 255, 255))
     rectified = rectify(image, corners)
